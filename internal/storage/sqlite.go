@@ -150,6 +150,19 @@ func NewSQLite(path string) (Store, error) {
 		return nil, err
 	}
 
+	// Crear tabla zones si no existe (almacena geom como GeoJSON text)
+	zonesSchema := `CREATE TABLE IF NOT EXISTS zones (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT,
+		geom TEXT,
+		created_at TEXT
+	);`
+
+	if _, err := db.Exec(zonesSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return &SQLiteStore{db: db}, nil
 }
 
