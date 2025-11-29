@@ -143,7 +143,14 @@ func NewSQLite(path string) (Store, error) {
         message TEXT,
         extract TEXT,
         timestamp TEXT
-    );`
+    );
+    CREATE TABLE IF NOT EXISTS zones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        geom TEXT,
+        created_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp);`
 
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
