@@ -5,9 +5,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"alerta_climatica/internal/processing"
@@ -18,10 +20,13 @@ type Server struct {
 	state *State
 	proc  *processing.Processor
 	mux   *http.ServeMux
+	// simple in-memory cache for proxied routes (key = "from|to")
+	cache   map[string][]byte
+	cacheMu sync.Mutex
 }
 
 func NewServer(state *State, proc *processing.Processor) *Server {
-	s := &Server{state: state, proc: proc, mux: http.NewServeMux()}
+	s := &Server{state: state, proc: proc, mux: http.NewServeMux(), cache: make(map[string][]byte)}
 	s.routes()
 	// Semilla de demo para que la UI no esté vacía al iniciar.
 	s.state.Seed(time.Now())
@@ -42,8 +47,80 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/alerts", s.handleAlerts)
 	s.mux.HandleFunc("/api/zones", s.handleZones)
 	s.mux.HandleFunc("/api/zones_geojson", s.handleZonesGeoJSON)
+	s.mux.HandleFunc("/api/route", s.handleRoute)
 	s.mux.HandleFunc("/api/admin/import_zones", s.handleImportZones)
 	s.mux.HandleFunc("/api/reset", s.handleReset)
+}
+
+// GET /api/route?from=lon,lat&to=lon,lat
+// Proxies request to OSRM public service and caches the response in-memory.
+func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	from := q.Get("from")
+	to := q.Get("to")
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+		http.Error(w, "missing from/to parameters", http.StatusBadRequest)
+		return
+	}
+
+	// basic validation: ensure they look like lon,lat
+	if _, err := url.Parse("//" + from); err != nil {
+		// not strict, we'll still try
+	}
+
+	key := from + "|" + to
+
+	// 1) check in-memory cache
+	s.cacheMu.Lock()
+	if b, ok := s.cache[key]; ok {
+		s.cacheMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b)
+		return
+	}
+	s.cacheMu.Unlock()
+
+	// 2) check persisted cache in store (if available)
+	const routeTTL = 24 * time.Hour
+	if respBytes, createdAt, found, err := s.state.GetRoute(key); err == nil && found {
+		if time.Since(createdAt) <= routeTTL {
+			// cache in memory for faster subsequent responses
+			s.cacheMu.Lock()
+			s.cache[key] = respBytes
+			s.cacheMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(respBytes)
+			return
+		}
+		// expired: continue to re-fetch and replace
+	}
+
+	// 3) fetch from OSRM public API
+	osrmURL := "https://router.project-osrm.org/route/v1/driving/" + url.PathEscape(from) + ";" + url.PathEscape(to) + "?overview=full&geometries=geojson"
+	resp, err := http.Get(osrmURL)
+	if err != nil {
+		log.Println("error calling osrm:", err)
+		http.Error(w, "error contacting routing service", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Println("error reading osrm response:", err)
+		http.Error(w, "error reading routing response", http.StatusInternalServerError)
+		return
+	}
+
+	// persist to DB (best-effort) and in-memory cache
+	if err := s.state.SaveRoute(key, body); err != nil {
+		log.Println("warning: could not persist route:", err)
+	}
+	s.cacheMu.Lock()
+	s.cache[key] = body
+	s.cacheMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 // GET /api/zones_geojson: devuelve el GeoJSON de zonas enriquecido con el estado actual.

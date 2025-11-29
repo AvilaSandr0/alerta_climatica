@@ -5,6 +5,7 @@ async function fetchJSON(url, opts = {}) {
 }
 let map = null
 let geojsonLayer = null
+let routeLayer = null
 
 function colorForStatus(status) {
   switch (status) {
@@ -50,6 +51,8 @@ async function loadZones() {
     if (geojsonLayer) {
       geojsonLayer.clearLayers()
       geojsonLayer.addData(data)
+      // redraw evacuation routes when zones update
+      await drawEvacRoutes(data)
     } else {
       geojsonLayer = L.geoJSON(data, { style: styleFunc, onEachFeature: onEachFeature }).addTo(map)
       try {
@@ -57,9 +60,85 @@ async function loadZones() {
       } catch (e) {
         // ignore if bounds invalid
       }
+      // initial evacuation routes
+      await drawEvacRoutes(data)
     }
   } catch (e) {
     console.error('loadZones', e)
+  }
+}
+
+function computeCentroid(feature) {
+  // very simple centroid: average of first ring coordinates
+  try {
+    const coords = feature.geometry && feature.geometry.coordinates
+    if (!coords) return null
+    // For Polygon, coords[0] is the outer ring (array of [lon,lat])
+    const ring = coords[0]
+    let sx = 0, sy = 0, n = 0
+    for (const p of ring) {
+      sx += p[0]
+      sy += p[1]
+      n++
+    }
+    if (n === 0) return null
+    const lon = sx / n
+    const lat = sy / n
+    return [lat, lon]
+  } catch (e) {
+    return null
+  }
+}
+
+async function drawEvacRoutes(data) {
+  if (!map || !data || !data.features) return
+  if (routeLayer) {
+    routeLayer.clearLayers()
+  } else {
+    routeLayer = L.layerGroup().addTo(map)
+  }
+
+  // Default safe point (lat, lon). Can be overridden per feature via properties.shelter = [lat,lon]
+  const defaultSafe = [-11.96, -77.03]
+
+  // Use sequential requests to avoid hammering public OSRM demo server
+  for (const f of data.features) {
+    try {
+      const c = computeCentroid(f)
+      if (!c) continue
+
+      const fromLat = c[0]
+      const fromLon = c[1]
+
+      let safe = defaultSafe
+      if (f.properties && f.properties.shelter && Array.isArray(f.properties.shelter) && f.properties.shelter.length >= 2) {
+        safe = f.properties.shelter
+      }
+      const toLat = safe[0]
+      const toLon = safe[1]
+
+      // Request server-side route (server will proxy to OSRM and cache)
+      const url = `/api/route?from=${fromLon},${fromLat}&to=${toLon},${toLat}`
+      const resp = await fetchJSON(url)
+      if (resp && resp.routes && resp.routes.length > 0 && resp.routes[0].geometry) {
+        const coords = resp.routes[0].geometry.coordinates // array of [lon,lat]
+        const latlngs = coords.map(p => [p[1], p[0]])
+        const routeLine = L.polyline(latlngs, { color: '#e74c3c', weight: 3, opacity: 0.85 })
+        routeLine.bindPopup(`<strong>${(f.properties && f.properties.name) || 'Zona'}</strong><br/>Ruta de evacuación`)
+        routeLayer.addLayer(routeLine)
+      } else {
+        // fallback: straight dashed line
+        const from = L.latLng(fromLat, fromLon)
+        const to = L.latLng(toLat, toLon)
+        const line = L.polyline([from, to], { color: '#e74c3c', weight: 2, dashArray: '6,6' })
+        line.bindPopup(`<strong>${(f.properties && f.properties.name) || 'Zona'}</strong><br/>Ruta de evacuación (directa)`)
+        routeLayer.addLayer(line)
+      }
+      // small delay to be polite with the public OSRM demo server
+      await new Promise(r => setTimeout(r, 120))
+    } catch (e) {
+      console.warn('route error for feature', f, e)
+    }
   }
 }
 
@@ -102,10 +181,12 @@ async function resetZones() {
   await loadZones()
 }
 
-document.getElementById('smsForm').addEventListener('submit', submitSMS)
-document.getElementById('resetBtn').addEventListener('click', resetZones)
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('smsForm').addEventListener('submit', submitSMS)
+  document.getElementById('resetBtn').addEventListener('click', resetZones)
 
-initMap()
-refreshAlerts()
-setInterval(() => { refreshAlerts(); loadZones(); }, 3000)
+  initMap()
+  refreshAlerts()
+  setInterval(() => { refreshAlerts(); loadZones(); }, 3000)
+})
 

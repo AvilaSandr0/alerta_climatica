@@ -122,3 +122,19 @@ func (s *State) Seed(now time.Time) {
 	demo := processing.Alert{ID: "demo1", Zone: "Zona Norte", Type: "informativo", Severity: "baja", Message: "Inicio del sistema", Timestamp: now}
 	s.AddAlert(demo)
 }
+
+// SaveRoute guarda la respuesta raw de routing en el store si está disponible.
+func (s *State) SaveRoute(key string, response []byte) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.SaveRoute(key, response)
+}
+
+// GetRoute devuelve la respuesta guardada y su timestamp (found==false si no existe).
+func (s *State) GetRoute(key string) (response []byte, createdAt time.Time, found bool, err error) {
+	if s.store == nil {
+		return nil, time.Time{}, false, nil
+	}
+	return s.store.GetRoute(key)
+}

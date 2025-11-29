@@ -19,6 +19,9 @@ type Store interface {
 	// Zones-related methods
 	ImportZonesFromGeoJSON(data []byte) error
 	ListZones() ([]Zone, error)
+	// Routes persistence (keyed cache)
+	SaveRoute(key string, response []byte) error
+	GetRoute(key string) (response []byte, createdAt time.Time, found bool, err error)
 	Close() error
 }
 
@@ -163,6 +166,18 @@ func NewSQLite(path string) (Store, error) {
 		return nil, err
 	}
 
+	// Crear tabla routes para cachear rutas calculadas por OSRM
+	routesSchema := `CREATE TABLE IF NOT EXISTS routes (
+		key TEXT PRIMARY KEY,
+		response BLOB,
+		created_at TEXT
+	);`
+
+	if _, err := db.Exec(routesSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return &SQLiteStore{db: db}, nil
 }
 
@@ -197,4 +212,28 @@ func (s *SQLiteStore) ListAlerts() ([]processing.Alert, error) {
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// SaveRoute guarda o reemplaza la respuesta de routing en la DB.
+func (s *SQLiteStore) SaveRoute(key string, response []byte) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO routes(key, response, created_at) VALUES(?,?,?)`, key, response, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// GetRoute devuelve la respuesta guardada y su timestamp (si existe).
+func (s *SQLiteStore) GetRoute(key string) (response []byte, createdAt time.Time, found bool, err error) {
+	row := s.db.QueryRow(`SELECT response, created_at FROM routes WHERE key = ?`, key)
+	var ts string
+	var resp []byte
+	if err := row.Scan(&resp, &ts); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, time.Time{}, false, nil
+		}
+		return nil, time.Time{}, false, err
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t = time.Time{}
+	}
+	return resp, t, true, nil
 }
