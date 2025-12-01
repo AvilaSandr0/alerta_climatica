@@ -36,18 +36,33 @@ async function initMap() {
     console.warn('Leaflet no cargado')
     return
   }
+  const mapContainer = document.getElementById('leaflet-map')
+  if (!mapContainer) {
+    console.error('Map container not found')
+    return
+  }
   map = L.map('leaflet-map').setView([-11.98, -77.02], 12)
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '© OpenStreetMap contributors'
   }).addTo(map)
+  
+  // Wait a bit for map to render
+  await new Promise(r => setTimeout(r, 100))
   await loadZones()
 }
 
 async function loadZones() {
   try {
     const data = await fetchJSON('/api/zones_geojson')
-    if (!map) return
+    if (!map) {
+      console.warn('Map not initialized yet')
+      return
+    }
+    if (!data || !data.features || data.features.length === 0) {
+      console.warn('No zones data received')
+      return
+    }
     if (geojsonLayer) {
       geojsonLayer.clearLayers()
       geojsonLayer.addData(data)
@@ -56,15 +71,18 @@ async function loadZones() {
     } else {
       geojsonLayer = L.geoJSON(data, { style: styleFunc, onEachFeature: onEachFeature }).addTo(map)
       try {
-        map.fitBounds(geojsonLayer.getBounds(), { padding: [20,20] })
+        const bounds = geojsonLayer.getBounds()
+        if (bounds.isValid()) {
+          map.fitBounds(bounds, { padding: [20,20] })
+        }
       } catch (e) {
-        // ignore if bounds invalid
+        console.warn('Error fitting bounds:', e)
       }
       // initial evacuation routes
       await drawEvacRoutes(data)
     }
   } catch (e) {
-    console.error('loadZones', e)
+    console.error('loadZones error:', e)
   }
 }
 
@@ -105,7 +123,10 @@ async function drawEvacRoutes(data) {
   for (const f of data.features) {
     try {
       const c = computeCentroid(f)
-      if (!c) continue
+      if (!c) {
+        console.warn('No centroid for feature', f.properties?.name)
+        continue
+      }
 
       const fromLat = c[0]
       const fromLon = c[1]
@@ -117,17 +138,38 @@ async function drawEvacRoutes(data) {
       const toLat = safe[0]
       const toLon = safe[1]
 
+      // Add marker for shelter point
+      const shelterIcon = L.icon({
+        iconUrl: 'data:image/svg+xml;base64,' + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="#2ecc71"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>'),
+        iconSize: [24, 24],
+        iconAnchor: [12, 24],
+        popupAnchor: [0, -24]
+      })
+      const shelterMarker = L.marker([toLat, toLon], { icon: shelterIcon })
+      shelterMarker.bindPopup(`<strong>Punto de Refugio</strong><br/>${(f.properties && f.properties.name) || 'Zona'}`)
+      routeLayer.addLayer(shelterMarker)
+
       // Request server-side route (server will proxy to OSRM and cache)
-      const url = `/api/route?from=${fromLon},${fromLat}&to=${toLon},${toLat}`
-      const resp = await fetchJSON(url)
-      if (resp && resp.routes && resp.routes.length > 0 && resp.routes[0].geometry) {
-        const coords = resp.routes[0].geometry.coordinates // array of [lon,lat]
-        const latlngs = coords.map(p => [p[1], p[0]])
-        const routeLine = L.polyline(latlngs, { color: '#e74c3c', weight: 3, opacity: 0.85 })
-        routeLine.bindPopup(`<strong>${(f.properties && f.properties.name) || 'Zona'}</strong><br/>Ruta de evacuación`)
-        routeLayer.addLayer(routeLine)
-      } else {
-        // fallback: straight dashed line
+      try {
+        const url = `/api/route?from=${fromLon},${fromLat}&to=${toLon},${toLat}`
+        const resp = await fetchJSON(url)
+        if (resp && resp.routes && resp.routes.length > 0 && resp.routes[0].geometry) {
+          const coords = resp.routes[0].geometry.coordinates // array of [lon,lat]
+          const latlngs = coords.map(p => [p[1], p[0]])
+          const routeLine = L.polyline(latlngs, { color: '#e74c3c', weight: 3, opacity: 0.85 })
+          routeLine.bindPopup(`<strong>${(f.properties && f.properties.name) || 'Zona'}</strong><br/>Ruta de evacuación`)
+          routeLayer.addLayer(routeLine)
+        } else {
+          // fallback: straight dashed line
+          const from = L.latLng(fromLat, fromLon)
+          const to = L.latLng(toLat, toLon)
+          const line = L.polyline([from, to], { color: '#e74c3c', weight: 2, dashArray: '6,6' })
+          line.bindPopup(`<strong>${(f.properties && f.properties.name) || 'Zona'}</strong><br/>Ruta de evacuación (directa)`)
+          routeLayer.addLayer(line)
+        }
+      } catch (routeErr) {
+        console.warn('Error fetching route for', f.properties?.name, routeErr)
+        // fallback: straight dashed line even on error
         const from = L.latLng(fromLat, fromLon)
         const to = L.latLng(toLat, toLon)
         const line = L.polyline([from, to], { color: '#e74c3c', weight: 2, dashArray: '6,6' })
@@ -137,7 +179,7 @@ async function drawEvacRoutes(data) {
       // small delay to be polite with the public OSRM demo server
       await new Promise(r => setTimeout(r, 120))
     } catch (e) {
-      console.warn('route error for feature', f, e)
+      console.warn('route error for feature', f.properties?.name, e)
     }
   }
 }

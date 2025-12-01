@@ -3,7 +3,10 @@
   "features": [
     {
       "type": "Feature",
-      "properties": { "name": "Zona Norte" },
+      "properties": { 
+        "name": "Zona Norte",
+        "shelter": [ -11.92, -77.02 ]
+      },
       "geometry": {
         "type": "Polygon",
         "coordinates": [[
@@ -17,7 +20,10 @@
     },
     {
       "type": "Feature",
-      "properties": { "name": "Zona Centro" },
+      "properties": { 
+        "name": "Zona Centro",
+        "shelter": [ -11.94, -76.96 ]
+      },
       "geometry": {
         "type": "Polygon",
         "coordinates": [[
@@ -31,7 +37,10 @@
     },
     {
       "type": "Feature",
-      "properties": { "name": "Zona Sur" },
+      "properties": { 
+        "name": "Zona Sur",
+        "shelter": [ -12.02, -77.02 ]
+      },
       "geometry": {
         "type": "Polygon",
         "coordinates": [[

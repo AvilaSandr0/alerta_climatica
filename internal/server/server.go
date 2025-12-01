@@ -134,12 +134,24 @@ func (s *Server) handleZonesGeoJSON(w http.ResponseWriter, r *http.Request) {
 		fc := map[string]interface{}{"type": "FeatureCollection", "features": []interface{}{}}
 		features := make([]interface{}, 0, len(zlist))
 		statuses := s.state.Zones()
+		
+		// Mapa de refugios por defecto por zona (puede ser sobrescrito si existe en DB)
+		defaultShelters := map[string][]float64{
+			"Zona Norte": {-11.92, -77.02},
+			"Zona Centro": {-11.94, -76.96},
+			"Zona Sur": {-12.02, -77.02},
+		}
+		
 		for _, z := range zlist {
 			var geom interface{}
 			if err := json.Unmarshal([]byte(z.Geom), &geom); err != nil {
 				geom = nil
 			}
 			props := map[string]interface{}{"name": z.Name, "status": statuses[z.Name]}
+			// Agregar punto de refugio si existe en el mapa de defaults
+			if shelter, ok := defaultShelters[z.Name]; ok {
+				props["shelter"] = shelter
+			}
 			feat := map[string]interface{}{"type": "Feature", "properties": props, "geometry": geom}
 			features = append(features, feat)
 		}

@@ -20,11 +20,32 @@ type State struct {
 
 // NewState crea el estado y puede recibir un storage.Store (nil para solo memoria).
 func NewState(store storage.Store) *State {
-	return &State{
+	s := &State{
 		alerts:     make([]processing.Alert, 0, 256),
-		zoneStatus: map[string]string{"Zona Norte": "verde", "Zona Centro": "verde", "Zona Sur": "verde"},
+		zoneStatus: make(map[string]string),
 		store:      store,
 	}
+	
+	// Inicializar zonas desde la base de datos si están disponibles
+	if store != nil {
+		if zones, err := store.ListZones(); err == nil && len(zones) > 0 {
+			for _, z := range zones {
+				s.zoneStatus[z.Name] = "verde"
+			}
+		} else {
+			// Fallback: zonas por defecto si no hay en la DB
+			s.zoneStatus["Zona Norte"] = "verde"
+			s.zoneStatus["Zona Centro"] = "verde"
+			s.zoneStatus["Zona Sur"] = "verde"
+		}
+	} else {
+		// Sin store: usar zonas por defecto
+		s.zoneStatus["Zona Norte"] = "verde"
+		s.zoneStatus["Zona Centro"] = "verde"
+		s.zoneStatus["Zona Sur"] = "verde"
+	}
+	
+	return s
 }
 
 // ImportZones importa un FeatureCollection GeoJSON al store si está disponible.
@@ -51,6 +72,10 @@ func (s *State) AddAlert(a processing.Alert) {
 	s.alerts = append(s.alerts, a)
 	if len(s.alerts) > 500 {
 		s.alerts = s.alerts[len(s.alerts)-500:]
+	}
+	// Asegurar que la zona existe en el mapa
+	if _, exists := s.zoneStatus[a.Zone]; !exists {
+		s.zoneStatus[a.Zone] = "verde"
 	}
 	switch a.Severity {
 	case "crítica":
