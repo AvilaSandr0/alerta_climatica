@@ -56,15 +56,26 @@
         <h2>Alertas Recientes</h2>
         <ul id="alerts" class="alerts"></ul>
       </section>
+
+      <section class="panel">
+        <h2>Chatbot (demo)</h2>
+        <div id="chat" class="chat">
+          <ul id="chatMessages" class="chat-messages"></ul>
+          <form id="chatForm" class="chat-form">
+            <input id="chatInput" type="text" placeholder="Escribe tu pregunta sobre el sistema o el clima..." autocomplete="off" />
+            <button type="submit">Enviar</button>
+          </form>
+        </div>
+      </section>
     </main>
 
     <footer>
       <small>Proyecto educativo en Go. Procesamiento concurrente con goroutines y regex.</small>
     </footer>
 
-    <script src="/static/app.js"></script>
   <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/app.js"></script>
   </body>
   </html>
 

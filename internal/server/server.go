@@ -5,11 +5,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"alerta_climatica/internal/integrations/groq"
 	"alerta_climatica/internal/processing"
 )
 
@@ -18,10 +21,13 @@ type Server struct {
 	state *State
 	proc  *processing.Processor
 	mux   *http.ServeMux
+	// simple in-memory cache for proxied routes (key = "from|to")
+	cache   map[string][]byte
+	cacheMu sync.Mutex
 }
 
 func NewServer(state *State, proc *processing.Processor) *Server {
-	s := &Server{state: state, proc: proc, mux: http.NewServeMux()}
+	s := &Server{state: state, proc: proc, mux: http.NewServeMux(), cache: make(map[string][]byte)}
 	s.routes()
 	// Semilla de demo para que la UI no esté vacía al iniciar.
 	s.state.Seed(time.Now())
@@ -42,8 +48,82 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/alerts", s.handleAlerts)
 	s.mux.HandleFunc("/api/zones", s.handleZones)
 	s.mux.HandleFunc("/api/zones_geojson", s.handleZonesGeoJSON)
+	s.mux.HandleFunc("/api/route", s.handleRoute)
+	// Chatbot via Groq/OpenAI-compatible API
+	s.mux.HandleFunc("/api/chat", s.handleChat)
 	s.mux.HandleFunc("/api/admin/import_zones", s.handleImportZones)
 	s.mux.HandleFunc("/api/reset", s.handleReset)
+}
+
+// GET /api/route?from=lon,lat&to=lon,lat
+// Proxies request to OSRM public service and caches the response in-memory.
+func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	from := q.Get("from")
+	to := q.Get("to")
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+		http.Error(w, "missing from/to parameters", http.StatusBadRequest)
+		return
+	}
+
+	// basic validation: ensure they look like lon,lat
+	if _, err := url.Parse("//" + from); err != nil {
+		// not strict, we'll still try
+	}
+
+	key := from + "|" + to
+
+	// 1) check in-memory cache
+	s.cacheMu.Lock()
+	if b, ok := s.cache[key]; ok {
+		s.cacheMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b)
+		return
+	}
+	s.cacheMu.Unlock()
+
+	// 2) check persisted cache in store (if available)
+	const routeTTL = 24 * time.Hour
+	if respBytes, createdAt, found, err := s.state.GetRoute(key); err == nil && found {
+		if time.Since(createdAt) <= routeTTL {
+			// cache in memory for faster subsequent responses
+			s.cacheMu.Lock()
+			s.cache[key] = respBytes
+			s.cacheMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(respBytes)
+			return
+		}
+		// expired: continue to re-fetch and replace
+	}
+
+	// 3) fetch from OSRM public API
+	osrmURL := "https://router.project-osrm.org/route/v1/driving/" + url.PathEscape(from) + ";" + url.PathEscape(to) + "?overview=full&geometries=geojson"
+	resp, err := http.Get(osrmURL)
+	if err != nil {
+		log.Println("error calling osrm:", err)
+		http.Error(w, "error contacting routing service", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Println("error reading osrm response:", err)
+		http.Error(w, "error reading routing response", http.StatusInternalServerError)
+		return
+	}
+
+	// persist to DB (best-effort) and in-memory cache
+	if err := s.state.SaveRoute(key, body); err != nil {
+		log.Println("warning: could not persist route:", err)
+	}
+	s.cacheMu.Lock()
+	s.cache[key] = body
+	s.cacheMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 // GET /api/zones_geojson: devuelve el GeoJSON de zonas enriquecido con el estado actual.
@@ -57,12 +137,24 @@ func (s *Server) handleZonesGeoJSON(w http.ResponseWriter, r *http.Request) {
 		fc := map[string]interface{}{"type": "FeatureCollection", "features": []interface{}{}}
 		features := make([]interface{}, 0, len(zlist))
 		statuses := s.state.Zones()
+
+		// Mapa de refugios por defecto por zona (puede ser sobrescrito si existe en DB)
+		defaultShelters := map[string][]float64{
+			"Zona Norte":  {-11.92, -77.02},
+			"Zona Centro": {-11.94, -76.96},
+			"Zona Sur":    {-12.02, -77.02},
+		}
+
 		for _, z := range zlist {
 			var geom interface{}
 			if err := json.Unmarshal([]byte(z.Geom), &geom); err != nil {
 				geom = nil
 			}
 			props := map[string]interface{}{"name": z.Name, "status": statuses[z.Name]}
+			// Agregar punto de refugio si existe en el mapa de defaults
+			if shelter, ok := defaultShelters[z.Name]; ok {
+				props["shelter"] = shelter
+			}
 			feat := map[string]interface{}{"type": "Feature", "properties": props, "geometry": geom}
 			features = append(features, feat)
 		}
@@ -136,6 +228,55 @@ func (s *Server) handleImportZones(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/chat
+// Body: { "message": "..." }
+// Forwards the message to Groq/OpenAI-compatible API and returns { "reply": "..." }
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "JSON inválido", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(in.Message) == "" {
+		http.Error(w, "message required", http.StatusBadRequest)
+		return
+	}
+
+	apiKey := os.Getenv("GROQ_API_KEY")
+	if apiKey == "" {
+		http.Error(w, "server misconfigured: GROQ_API_KEY not set", http.StatusInternalServerError)
+		return
+	}
+	model := os.Getenv("GROQ_MODEL")
+	if model == "" {
+		model = "openai/gpt-oss-120b"
+	}
+
+	// Persist user message (best-effort)
+	go s.state.SaveChatMessage("user", in.Message)
+
+	// Build messages compatible structure
+	msgs := []groq.Message{{Role: "user", Content: in.Message}}
+	reply, err := groq.Chat(r.Context(), apiKey, model, msgs)
+	if err != nil {
+		log.Println("groq chat error:", err)
+		http.Error(w, "error calling chat service", http.StatusBadGateway)
+		return
+	}
+
+	// Persist bot reply (best-effort)
+	go s.state.SaveChatMessage("bot", reply)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"reply": reply})
 }
 
 // GET /

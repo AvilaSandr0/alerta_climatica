@@ -60,6 +60,9 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// Log PID to help correlate system events
+	log.Printf("PID: %d", os.Getpid())
+
 	// Señales para shutdown ordenado
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -72,9 +75,9 @@ func main() {
 		}
 	}()
 
-	// Esperar señal
-	<-stop
-	log.Println("Shutdown: señal recibida, iniciando cierre ordenado...")
+	// Esperar señal y loguear cuál fue
+	sig := <-stop
+	log.Printf("Shutdown: señal recibida: %v, iniciando cierre ordenado...", sig)
 
 	// 1) Parar de aceptar nuevas conexiones
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -92,3 +92,17 @@ button.secondary { background: #30363d; color: var(--text); }
 
 @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
 
+/* Chat styles */
+.chat { display:flex; flex-direction:column; gap:8px; }
+.chat-messages { list-style:none; padding:8px; margin:0; max-height:220px; overflow:auto; border:1px solid #30363d; border-radius:6px; background:#0b0f14 }
+.chat-messages li { margin:6px 0; display:flex; }
+.chat-messages .msg { padding:8px 10px; border-radius:10px; max-width:78%; font-size:14px }
+.chat-messages .user { margin-left:auto; background:var(--accent); color:#071324 }
+.chat-messages .bot { margin-right:auto; background:#1b2730; color:var(--text); border:1px solid #26313a }
+.chat-form { display:flex; gap:8px }
+.chat-form input[type=text] { flex:1; padding:8px; border-radius:6px; border:1px solid #30363d; background:#071018; color:var(--text) }
+.chat-form button { padding:8px 12px }
+
+.chat-messages::-webkit-scrollbar { height:8px; width:8px }
+.chat-messages::-webkit-scrollbar-thumb { background: #30363d; border-radius:8px }
+

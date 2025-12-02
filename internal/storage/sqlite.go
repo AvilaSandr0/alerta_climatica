@@ -19,6 +19,12 @@ type Store interface {
 	// Zones-related methods
 	ImportZonesFromGeoJSON(data []byte) error
 	ListZones() ([]Zone, error)
+	// Routes persistence (keyed cache)
+	SaveRoute(key string, response []byte) error
+	GetRoute(key string) (response []byte, createdAt time.Time, found bool, err error)
+	// Chat persistence
+	SaveChat(role string, content string) error
+	ListChats(limit int) ([]ChatMessage, error)
 	Close() error
 }
 
@@ -157,6 +163,43 @@ func NewSQLite(path string) (Store, error) {
 		return nil, err
 	}
 
+	// Crear tabla zones si no existe (almacena geom como GeoJSON text)
+	zonesSchema := `CREATE TABLE IF NOT EXISTS zones (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT,
+		geom TEXT,
+		created_at TEXT
+	);`
+
+	if _, err := db.Exec(zonesSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	// Crear tabla routes para cachear rutas calculadas por OSRM
+	routesSchema := `CREATE TABLE IF NOT EXISTS routes (
+		key TEXT PRIMARY KEY,
+		response BLOB,
+		created_at TEXT
+	);`
+
+	if _, err := db.Exec(routesSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	// Create table chats for storing conversation history
+	chatsSchema := `CREATE TABLE IF NOT EXISTS chats (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		role TEXT,
+		content TEXT,
+		created_at TEXT
+	);`
+	if _, err := db.Exec(chatsSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return &SQLiteStore{db: db}, nil
 }
 
@@ -191,4 +234,67 @@ func (s *SQLiteStore) ListAlerts() ([]processing.Alert, error) {
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// SaveRoute guarda o reemplaza la respuesta de routing en la DB.
+func (s *SQLiteStore) SaveRoute(key string, response []byte) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO routes(key, response, created_at) VALUES(?,?,?)`, key, response, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// GetRoute devuelve la respuesta guardada y su timestamp (si existe).
+func (s *SQLiteStore) GetRoute(key string) (response []byte, createdAt time.Time, found bool, err error) {
+	row := s.db.QueryRow(`SELECT response, created_at FROM routes WHERE key = ?`, key)
+	var ts string
+	var resp []byte
+	if err := row.Scan(&resp, &ts); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, time.Time{}, false, nil
+		}
+		return nil, time.Time{}, false, err
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t = time.Time{}
+	}
+	return resp, t, true, nil
+}
+
+// ChatMessage representa una entrada de chat guardada.
+type ChatMessage struct {
+	ID        int64
+	Role      string
+	Content   string
+	CreatedAt time.Time
+}
+
+// SaveChat guarda un mensaje de chat (usuario o bot).
+func (s *SQLiteStore) SaveChat(role string, content string) error {
+	_, err := s.db.Exec(`INSERT INTO chats(role, content, created_at) VALUES(?,?,?)`, role, content, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// ListChats devuelve los mensajes de chat más recientes (limit mayor a 0)
+func (s *SQLiteStore) ListChats(limit int) ([]ChatMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`SELECT id, role, content, created_at FROM chats ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ChatMessage, 0)
+	for rows.Next() {
+		var cm ChatMessage
+		var ts string
+		if err := rows.Scan(&cm.ID, &cm.Role, &cm.Content, &ts); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			cm.CreatedAt = t
+		}
+		out = append(out, cm)
+	}
+	return out, nil
 }
