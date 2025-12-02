@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"alerta_climatica/internal/integrations/groq"
 	"alerta_climatica/internal/processing"
 )
 
@@ -48,6 +49,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/zones", s.handleZones)
 	s.mux.HandleFunc("/api/zones_geojson", s.handleZonesGeoJSON)
 	s.mux.HandleFunc("/api/route", s.handleRoute)
+	// Chatbot via Groq/OpenAI-compatible API
+	s.mux.HandleFunc("/api/chat", s.handleChat)
 	s.mux.HandleFunc("/api/admin/import_zones", s.handleImportZones)
 	s.mux.HandleFunc("/api/reset", s.handleReset)
 }
@@ -134,14 +137,14 @@ func (s *Server) handleZonesGeoJSON(w http.ResponseWriter, r *http.Request) {
 		fc := map[string]interface{}{"type": "FeatureCollection", "features": []interface{}{}}
 		features := make([]interface{}, 0, len(zlist))
 		statuses := s.state.Zones()
-		
+
 		// Mapa de refugios por defecto por zona (puede ser sobrescrito si existe en DB)
 		defaultShelters := map[string][]float64{
-			"Zona Norte": {-11.92, -77.02},
+			"Zona Norte":  {-11.92, -77.02},
 			"Zona Centro": {-11.94, -76.96},
-			"Zona Sur": {-12.02, -77.02},
+			"Zona Sur":    {-12.02, -77.02},
 		}
-		
+
 		for _, z := range zlist {
 			var geom interface{}
 			if err := json.Unmarshal([]byte(z.Geom), &geom); err != nil {
@@ -225,6 +228,55 @@ func (s *Server) handleImportZones(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/chat
+// Body: { "message": "..." }
+// Forwards the message to Groq/OpenAI-compatible API and returns { "reply": "..." }
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "JSON inválido", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(in.Message) == "" {
+		http.Error(w, "message required", http.StatusBadRequest)
+		return
+	}
+
+	apiKey := os.Getenv("GROQ_API_KEY")
+	if apiKey == "" {
+		http.Error(w, "server misconfigured: GROQ_API_KEY not set", http.StatusInternalServerError)
+		return
+	}
+	model := os.Getenv("GROQ_MODEL")
+	if model == "" {
+		model = "openai/gpt-oss-120b"
+	}
+
+	// Persist user message (best-effort)
+	go s.state.SaveChatMessage("user", in.Message)
+
+	// Build messages compatible structure
+	msgs := []groq.Message{{Role: "user", Content: in.Message}}
+	reply, err := groq.Chat(r.Context(), apiKey, model, msgs)
+	if err != nil {
+		log.Println("groq chat error:", err)
+		http.Error(w, "error calling chat service", http.StatusBadGateway)
+		return
+	}
+
+	// Persist bot reply (best-effort)
+	go s.state.SaveChatMessage("bot", reply)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"reply": reply})
 }
 
 // GET /

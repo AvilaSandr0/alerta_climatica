@@ -25,7 +25,7 @@ func NewState(store storage.Store) *State {
 		zoneStatus: make(map[string]string),
 		store:      store,
 	}
-	
+
 	// Inicializar zonas desde la base de datos si están disponibles
 	if store != nil {
 		if zones, err := store.ListZones(); err == nil && len(zones) > 0 {
@@ -44,7 +44,7 @@ func NewState(store storage.Store) *State {
 		s.zoneStatus["Zona Centro"] = "verde"
 		s.zoneStatus["Zona Sur"] = "verde"
 	}
-	
+
 	return s
 }
 
@@ -162,4 +162,27 @@ func (s *State) GetRoute(key string) (response []byte, createdAt time.Time, foun
 		return nil, time.Time{}, false, nil
 	}
 	return s.store.GetRoute(key)
+}
+
+// SaveChatMessage guarda un mensaje de chat en el store si está disponible.
+func (s *State) SaveChatMessage(role, content string) {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.SaveChat(role, content); err != nil {
+		log.Println("warning: failed to persist chat message:", err)
+	}
+}
+
+// ListChatHistory devuelve los mensajes de chat más recientes (limit). Si hay error retorna nil.
+func (s *State) ListChatHistory(limit int) []storage.ChatMessage {
+	if s.store == nil {
+		return nil
+	}
+	out, err := s.store.ListChats(limit)
+	if err != nil {
+		log.Println("warning: failed to read chat history:", err)
+		return nil
+	}
+	return out
 }

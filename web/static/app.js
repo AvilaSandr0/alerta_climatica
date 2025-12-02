@@ -227,8 +227,63 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('smsForm').addEventListener('submit', submitSMS)
   document.getElementById('resetBtn').addEventListener('click', resetZones)
 
+  // Chat form (if present)
+  const chatForm = document.getElementById('chatForm')
+  const chatInput = document.getElementById('chatInput')
+  if (chatForm && chatInput) {
+    chatForm.addEventListener('submit', async (ev) => {
+      ev.preventDefault()
+      const text = chatInput.value || ''
+      if (!text.trim()) return
+      chatInput.value = ''
+      await sendChat(text)
+    })
+    // welcome message
+    appendChatMessage('bot', 'Hola — soy el asistente demo. Pregúntame sobre el sistema o el clima.')
+  }
+
   initMap()
   refreshAlerts()
   setInterval(() => { refreshAlerts(); loadZones(); }, 3000)
 })
+
+function appendChatMessage(who, text) {
+  const list = document.getElementById('chatMessages')
+  if (!list) return
+  const li = document.createElement('li')
+  const div = document.createElement('div')
+  div.className = 'msg ' + (who === 'user' ? 'user' : 'bot')
+  div.textContent = text
+  li.appendChild(div)
+  list.appendChild(li)
+  // scroll to bottom
+  list.scrollTop = list.scrollHeight
+}
+
+async function sendChat(text) {
+  appendChatMessage('user', text)
+  // Add a placeholder bot message (loading)
+  const list = document.getElementById('chatMessages')
+  const placeholder = document.createElement('li')
+  const phdiv = document.createElement('div')
+  phdiv.className = 'msg bot'
+  phdiv.textContent = 'Pensando...'
+  placeholder.appendChild(phdiv)
+  list.appendChild(placeholder)
+  list.scrollTop = list.scrollHeight
+
+  try {
+    const resp = await fetchJSON('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    })
+    const reply = (resp && resp.reply) ? resp.reply : '(sin respuesta)'
+    // replace placeholder text
+    phdiv.textContent = reply
+  } catch (e) {
+    console.error('chat error', e)
+    phdiv.textContent = 'Error al contactar el servicio de chat: ' + (e.message || e)
+  }
+}
 
